@@ -1,0 +1,334 @@
+﻿"use client";
+
+import { useMemo, useState } from "react";
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  defineChain,
+  http,
+  parseEventLogs,
+} from "viem";
+import { ammoraLaunchFactoryV4Abi } from "@ammora-protocol/sdk";
+
+const CHAIN_ID = 91342;
+const CONFIG_ID = BigInt(56);
+const RPC = "https://sepolia-rpc.giwa.io";
+const FACTORY = "0x35353a2Dab7426EcCAe6f5FB267702a542ab68fA" as const;
+
+const giwaChain = defineChain({
+  id: CHAIN_ID,
+  name: "GIWA Sepolia",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: [RPC] } },
+  blockExplorers: {
+    default: { name: "GIWA Explorer", url: "https://sepolia-explorer.giwa.io" },
+  },
+  testnet: true,
+});
+
+const launches = [
+  { name: "GIWA DOG", symbol: "GDOG", color: "from-orange-400 to-amber-600", progress: 82, raised: "8,200", target: "10,000", status: "Demo" },
+  { name: "Ammora AI", symbol: "AMAI", color: "from-violet-400 to-purple-700", progress: 54, raised: "5,400", target: "10,000", status: "Demo" },
+  { name: "Sepolia Cat", symbol: "SCAT", color: "from-cyan-400 to-blue-600", progress: 27, raised: "2,700", target: "10,000", status: "Demo" },
+];
+
+export default function Home() {
+  const [search, setSearch] = useState("");
+  const [modal, setModal] = useState(false);
+  const [active, setActive] = useState("Explore");
+  const [account, setAccount] = useState("");
+  const [tokenName, setTokenName] = useState("");
+  const [tokenSymbol, setTokenSymbol] = useState("");
+  const [metadataURI, setMetadataURI] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const [txHash, setTxHash] = useState("");
+  const [tokenAddress, setTokenAddress] = useState("");
+
+  const filtered = useMemo(
+    () => launches.filter((item) =>
+      (item.name + item.symbol).toLowerCase().includes(search.toLowerCase())
+    ),
+    [search]
+  );
+
+  async function connectWallet() {
+    try {
+      const ethereum = (window as any).ethereum;
+      if (!ethereum) {
+        setStatus("MetaMask belum terpasang. Silakan pasang MetaMask terlebih dahulu.");
+        return;
+      }
+
+      setBusy(true);
+      setStatus("Menghubungkan wallet...");
+      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
+      if (!accounts?.length) throw new Error("Wallet tidak memberikan akun.");
+
+      const chainHex = `0x${CHAIN_ID.toString(16)}`;
+      let currentChain = await ethereum.request({ method: "eth_chainId" });
+
+      if (parseInt(currentChain, 16) !== CHAIN_ID) {
+        try {
+          await ethereum.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: chainHex }],
+          });
+        } catch (switchError: any) {
+          if (switchError.code !== 4902) throw switchError;
+          await ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: chainHex,
+              chainName: "GIWA Sepolia",
+              nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+              rpcUrls: [RPC],
+              blockExplorerUrls: ["https://sepolia-explorer.giwa.io"],
+            }],
+          });
+        }
+        currentChain = await ethereum.request({ method: "eth_chainId" });
+      }
+
+      if (parseInt(currentChain, 16) !== CHAIN_ID) {
+        throw new Error("Wallet belum berada di GIWA Sepolia.");
+      }
+
+      setAccount(accounts[0]);
+      setStatus("Wallet berhasil terhubung ke GIWA Sepolia.");
+    } catch (error: any) {
+      setStatus(error.shortMessage || error.message || "Gagal menghubungkan wallet.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createToken() {
+    try {
+      if (!account) throw new Error("Hubungkan wallet terlebih dahulu.");
+      if (!tokenName.trim() || !tokenSymbol.trim()) {
+        throw new Error("Nama dan simbol token wajib diisi.");
+      }
+      if (!metadataURI.trim() || !/^(https:\/\/|ipfs:\/\/)/i.test(metadataURI.trim())) {
+        throw new Error("Metadata URI harus berupa HTTPS atau IPFS URI yang valid.");
+      }
+
+      const ethereum = (window as any).ethereum;
+      if (!ethereum) throw new Error("MetaMask tidak ditemukan.");
+
+      setBusy(true);
+      setTxHash("");
+      setTokenAddress("");
+      setStatus("Memeriksa jaringan dan menyiapkan simulasi...");
+
+      const publicClient = createPublicClient({
+        chain: giwaChain,
+        transport: http(RPC),
+      });
+
+      const walletClient = createWalletClient({
+        account: account as `0x${string}`,
+        chain: giwaChain,
+        transport: custom(ethereum),
+      });
+
+      const chainId = await publicClient.getChainId();
+      if (chainId !== CHAIN_ID) throw new Error("Jaringan RPC tidak sesuai.");
+
+      const simulation = await publicClient.simulateContract({
+        account: account as `0x${string}`,
+        address: FACTORY,
+        abi: ammoraLaunchFactoryV4Abi,
+        functionName: "createLaunch",
+        args: [
+          tokenName.trim(),
+          tokenSymbol.trim().toUpperCase(),
+          metadataURI.trim(),
+          CONFIG_ID,
+        ],
+        value: BigInt(0),
+      });
+
+      setStatus("Simulasi berhasil. Menunggu persetujuan transaksi di wallet...");
+      const hash = await walletClient.writeContract(simulation.request);
+      setTxHash(hash);
+      setStatus("Transaksi terkirim. Menunggu konfirmasi blockchain...");
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+      if (receipt.status !== "success") {
+        throw new Error("Transaksi gagal di blockchain. Periksa explorer.");
+      }
+
+      setStatus("Token berhasil dibuat di GIWA Sepolia!");
+      const launchEvents = parseEventLogs({
+        abi: ammoraLaunchFactoryV4Abi,
+        logs: receipt.logs,
+        eventName: "LaunchCreated",
+      });
+
+      const actualTokenAddress = launchEvents[0]?.args.token;
+
+      if (!actualTokenAddress) {
+        throw new Error("Transaksi sukses, tetapi event LaunchCreated tidak ditemukan.");
+      }
+
+      setTokenAddress(actualTokenAddress);
+    } catch (error: any) {
+      setStatus(error.shortMessage || error.message || "Pembuatan token gagal.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-[#080b14] text-white">
+      <div className="flex min-h-screen">
+        <aside className="hidden w-64 shrink-0 border-r border-white/[0.07] bg-[#0b0f1a] p-6 md:flex md:flex-col">
+          <div className="mb-12 flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-600 text-xl font-black">A</div>
+            <div>
+              <div className="text-lg font-bold tracking-tight">AMMORA</div>
+              <div className="text-[10px] tracking-[0.25em] text-violet-400">LAUNCHPAD</div>
+            </div>
+          </div>
+          <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Workspace</div>
+          <nav className="space-y-2">
+            {["Explore", "My Tokens", "Create Token", "Documentation"].map((item) => (
+              <button key={item} onClick={() => item === "Create Token" ? setModal(true) : setActive(item)}
+                className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-sm transition ${active === item ? "bg-violet-500/15 font-semibold text-violet-300" : "text-slate-400 hover:bg-white/[0.04] hover:text-white"}`}>
+                <span className="w-5 text-center">{item === "Explore" ? "◈" : item === "My Tokens" ? "▦" : item === "Create Token" ? "+" : "↗"}</span>
+                {item}
+              </button>
+            ))}
+          </nav>
+          <div className="mt-auto rounded-2xl border border-violet-400/20 bg-gradient-to-br from-violet-600/15 to-blue-600/5 p-4">
+            <div className="mb-2 text-sm font-semibold">Build on Ammora</div>
+            <p className="mb-4 text-xs leading-5 text-slate-400">Launch tokens with Ammora liquidity infrastructure.</p>
+            <a href="https://www.npmjs.com/package/@ammora-protocol/sdk" target="_blank" rel="noreferrer" className="text-xs font-semibold text-violet-300">Explore SDK ↗</a>
+          </div>
+        </aside>
+
+        <section className="min-w-0 flex-1">
+          <header className="flex min-h-[76px] items-center justify-between border-b border-white/[0.07] px-5 py-3 md:px-10">
+            <div className="md:hidden text-lg font-bold">◈ AMMORA</div>
+            <div className="hidden text-sm text-slate-400 md:block">Discover and launch tokens on GIWA</div>
+            <div className="flex items-center gap-3">
+              <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300">● GIWA Sepolia</span>
+              <button onClick={connectWallet} disabled={busy}
+                className="max-w-[190px] truncate rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-2.5 text-xs font-semibold text-violet-200 hover:bg-violet-500/20 disabled:opacity-50">
+                {account ? `${account.slice(0, 6)}...${account.slice(-4)}` : "Connect Wallet"}
+              </button>
+            </div>
+          </header>
+
+          <div className="mx-auto max-w-7xl px-5 py-9 md:px-10 md:py-12">
+            <div className="relative mb-9 overflow-hidden rounded-3xl border border-violet-400/20 bg-gradient-to-br from-[#21164a] via-[#15152e] to-[#101827] p-7 md:p-11">
+              <div className="pointer-events-none absolute -right-20 -top-32 h-80 w-80 rounded-full bg-violet-600/20 blur-3xl" />
+              <div className="relative max-w-2xl">
+                <div className="mb-5 inline-flex rounded-full border border-violet-300/20 bg-violet-300/10 px-3 py-1.5 text-[10px] font-semibold tracking-[0.18em] text-violet-200">THE AMMORA ECOSYSTEM</div>
+                <h1 className="mb-4 text-4xl font-bold leading-tight tracking-tight md:text-5xl">Discover the next<br /><span className="text-violet-300">big launch.</span></h1>
+                <p className="mb-7 max-w-lg text-sm leading-6 text-slate-300">Explore new token launches, follow their progress, and build your own project with Ammora liquidity infrastructure.</p>
+                <div className="flex flex-wrap gap-3">
+                  <button onClick={() => setActive("Explore")} className="rounded-xl bg-violet-500 px-5 py-3 text-sm font-bold hover:bg-violet-400">Explore launches ↗</button>
+                  <button onClick={() => setModal(true)} className="rounded-xl border border-white/20 bg-white/5 px-5 py-3 text-sm font-semibold hover:bg-white/10">＋ Create token</button>
+                </div>
+              </div>
+              <div className="absolute bottom-8 right-10 hidden text-[130px] font-black text-white/[0.035] lg:block">A</div>
+            </div>
+
+            <div className="mb-10 grid grid-cols-1 gap-4 sm:grid-cols-3">
+              {[
+                ["Total launches", "03", "Illustrative demo projects"],
+                ["Total raised", "16.3K", "Demo quote-token units"],
+                ["Network", "GIWA", "Sepolia testnet"],
+              ].map(([label, value, note]) => (
+                <div key={label} className="rounded-2xl border border-white/[0.07] bg-[#101522] p-5">
+                  <div className="mb-3 text-xs text-slate-400">{label}</div>
+                  <div className="text-2xl font-bold tracking-tight">{value}</div>
+                  <div className="mt-1 text-[11px] text-slate-500">{note}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+              <div>
+                <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">Discover</div>
+                <h2 className="text-2xl font-bold">Launch examples</h2>
+                <p className="mt-1 text-xs text-slate-500">Illustrative sample projects</p>
+              </div>
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search tokens..." className="w-full rounded-xl border border-white/10 bg-[#101522] px-4 py-3 text-sm outline-none placeholder:text-slate-500 focus:border-violet-500 sm:w-64" />
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              {filtered.map((token) => (
+                <article key={token.symbol} className="rounded-2xl border border-white/[0.08] bg-[#101522] p-5 transition hover:-translate-y-1 hover:border-violet-400/30">
+                  <div className="mb-5 flex items-center justify-between">
+                    <div className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${token.color} text-lg font-black`}>{token.symbol.slice(0, 1)}</div>
+                    <span className="rounded-full border border-slate-400/20 bg-slate-400/10 px-3 py-1 text-[10px] font-semibold text-slate-300">{token.status}</span>
+                  </div>
+                  <h3 className="font-bold">{token.name}</h3>
+                  <p className="mb-6 text-xs text-slate-500">${token.symbol}</p>
+                  <div className="mb-2 flex justify-between text-xs">
+                    <span className="text-slate-400">Bonding progress</span>
+                    <span className="font-semibold text-violet-300">{token.progress}%</span>
+                  </div>
+                  <div className="mb-3 h-2 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-400" style={{ width: `${token.progress}%` }} />
+                  </div>
+                  <div className="mb-5 flex justify-between text-[11px] text-slate-500"><span>{token.raised} raised</span><span>Target {token.target}</span></div>
+                  <button onClick={() => setStatus("Ini adalah contoh tampilan, bukan launch on-chain.")} className="w-full rounded-xl border border-white/10 bg-white/[0.04] py-3 text-xs font-semibold">View example ↗</button>
+                </article>
+              ))}
+            </div>
+
+            <div className="mt-8 rounded-2xl border border-amber-400/20 bg-amber-400/[0.05] p-4 text-xs leading-5 text-amber-200/80">
+              <strong>Demo preview:</strong> Contoh token dan statistik di atas bukan data live blockchain. Pembuatan token menggunakan Ammora SDK pada GIWA Sepolia.
+            </div>
+            <footer className="mt-12 border-t border-white/[0.07] pt-6 text-center text-[11px] text-slate-600">AMMORA LAUNCHPAD · BUILT WITH AMMORA SDK · GIWA SEPOLIA</footer>
+          </div>
+        </section>
+      </div>
+
+      {modal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/75 p-4 backdrop-blur-sm">
+          <div className="my-8 w-full max-w-md rounded-2xl border border-white/10 bg-[#121827] p-6 shadow-2xl">
+            <div className="mb-5 flex items-center justify-between">
+              <h2 className="text-xl font-bold">Create a token</h2>
+              <button onClick={() => setModal(false)} className="text-xl text-slate-400 hover:text-white">×</button>
+            </div>
+            <p className="mb-5 text-sm leading-6 text-slate-400">Create a token on GIWA Sepolia using Ammora V4. Config ID: 56.</p>
+
+            <label className="mb-2 block text-xs text-slate-400">Token name</label>
+            <input value={tokenName} onChange={(e) => setTokenName(e.target.value)} maxLength={64} placeholder="My awesome token" className="mb-4 w-full rounded-xl border border-white/10 bg-[#080b14] px-4 py-3 text-sm outline-none focus:border-violet-500" />
+
+            <label className="mb-2 block text-xs text-slate-400">Token symbol</label>
+            <input value={tokenSymbol} onChange={(e) => setTokenSymbol(e.target.value)} maxLength={12} placeholder="TOKEN" className="mb-4 w-full rounded-xl border border-white/10 bg-[#080b14] px-4 py-3 text-sm uppercase outline-none focus:border-violet-500" />
+
+            <label className="mb-2 block text-xs text-slate-400">Metadata URI (HTTPS or IPFS)</label>
+            <input value={metadataURI} onChange={(e) => setMetadataURI(e.target.value)} placeholder="ipfs://... or https://..." className="mb-5 w-full rounded-xl border border-white/10 bg-[#080b14] px-4 py-3 text-sm outline-none focus:border-violet-500" />
+
+            <div className="mb-4 rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-slate-400">
+              Wallet: {account ? `${account.slice(0, 8)}...${account.slice(-6)}` : "Not connected"}
+              <br />Network: GIWA Sepolia · Config: 56
+              <br />Pool creation fee in selected config: 0 (gas still applies)
+            </div>
+
+            <button onClick={createToken} disabled={busy || !account} className="w-full rounded-xl bg-violet-600 py-3 text-sm font-bold hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50">
+              {busy ? "Processing..." : "Simulate & Create Token"}
+            </button>
+
+            {status && <p className="mt-4 break-words text-xs leading-5 text-slate-300">{status}</p>}
+            {txHash && <p className="mt-2 break-all text-xs text-violet-300">Transaction: {txHash}</p>}
+            {tokenAddress && <p className="mt-2 break-all text-xs text-emerald-300">Token address: {tokenAddress}</p>}
+            {tokenAddress && <a className="mt-2 block text-xs text-emerald-300 underline" target="_blank" rel="noreferrer" href={`https://sepolia-explorer.giwa.io/address/${tokenAddress}`}>View token contract on explorer ?</a>}
+            {txHash && <a className="mt-3 block text-xs text-violet-300 underline" target="_blank" rel="noreferrer" href={`https://sepolia-explorer.giwa.io/tx/${txHash}`}>View transaction on explorer ↗</a>}
+            <p className="mt-4 text-center text-[10px] text-slate-600">A wallet confirmation is required before any transaction is sent. Testnet only.</p>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+}
+
